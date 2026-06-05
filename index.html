@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f97316">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="現場タスク">
+<title>現場タスク管理</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" href="icon-192.png">
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;margin:0;padding:0}
+  body{background:#111;color:#e5e5e5;font-family:'Hiragino Kaku Gothic ProN','Noto Sans JP',sans-serif;min-height:100vh;overscroll-behavior:none}
+  input,textarea,button{font-family:inherit}
+  input[type=date]::-webkit-calendar-picker-indicator{filter:invert(1);opacity:.5}
+  ::-webkit-scrollbar{width:4px;height:4px}
+  ::-webkit-scrollbar-track{background:#111}
+  ::-webkit-scrollbar-thumb{background:#333;border-radius:2px}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
+  .modal-sheet{animation:slideUp .25s ease}
+  .spinner{display:inline-block;width:16px;height:16px;border:2px solid #f9731644;border-top-color:#f97316;border-radius:50%;animation:spin .7s linear infinite}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="text/babel">
+const {useState, useRef, useCallback} = React;
+
+// ── 定数 ──────────────────────────────────────────
+const STATUSES = ["未着手","進行中","完了"];
+const DATE_MODES = ["期間指定","候補日"];
+const STATUS_COLORS = {
+  "未着手":{bg:"#3b3b3b",text:"#f97316",dot:"#f97316"},
+  "進行中":{bg:"#1e3a5f",text:"#60a5fa",dot:"#60a5fa"},
+  "完了"  :{bg:"#14532d",text:"#4ade80",dot:"#4ade80"},
+};
+
+const today = () => new Date().toISOString().split("T")[0];
+const fmtDate = d => { if(!d) return ""; const dt=new Date(d+"T00:00:00"); return `${dt.getMonth()+1}/${dt.getDate()}`; };
+const dateLabel = task => {
+  if(task.dateMode==="期間指定"){
+    if(task.dateFrom&&task.dateTo) return `${fmtDate(task.dateFrom)}〜${fmtDate(task.dateTo)}`;
+    if(task.dateFrom) return `${fmtDate(task.dateFrom)}〜`;
+    return "";
+  }
+  const days=(task.candidateDates||[]).filter(Boolean);
+  return days.length ? days.map(fmtDate).join(" / ") : "";
+};
+const emptyForm = () => ({siteName:"",detail:"",workers:"",dateMode:"期間指定",dateFrom:today(),dateTo:"",candidateDates:[""]});
+
+const STORAGE_KEY = "genba_tasks_v2";
+const loadTasks = () => { try{ return JSON.parse(localStorage.getItem(STORAGE_KEY)||"null"); }catch(e){ return null; } };
+const saveTasks = ts => { try{ localStorage.setItem(STORAGE_KEY,JSON.stringify(ts)); }catch(e){} };
+
+const DEMO = [
+  {id:1,siteName:"山田工務店 第1現場",detail:"3Fトイレの配管を交換する",status:"進行中",workers:"3〜4人",dateMode:"期間指定",dateFrom:today(),dateTo:"",candidateDates:[],createdAt:Date.now()-86400000},
+  {id:2,siteName:"ABC建設 北棟",detail:"北側足場の安全点検を実施",status:"未着手",workers:"2人",dateMode:"候補日",dateFrom:"",dateTo:"",candidateDates:[today(),""],createdAt:Date.now()-3600000},
+];
+
+// スタイル定数
+const IS = {width:"100%",background:"#111",border:"1.5px solid #2a2a2a",borderRadius:8,color:"#e5e5e5",padding:"9px 12px",fontSize:14,boxSizing:"border-box",fontFamily:"inherit"};
+const LS = {fontSize:12,color:"#888",fontWeight:600,display:"block",marginBottom:6};
+
+// ── ローカル音声解析（APIキー不要・オフライン動作） ────────
+// 話した内容をブラウザ内のルールベース解析で構造化する（課金なし）
+const WD = {"日":0,"月":1,"火":2,"水":3,"木":4,"金":5,"土":6};
+const pad2 = n => String(n).padStart(2,"0");
+const ymd = d => `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
+const addDays = (d,n) => { const x=new Date(d); x.setDate(x.getDate()+n); return x; };
+const dayStart = d => { const x=new Date(d); x.setHours(0,0,0,0); return x; };
+
+// 日付を絞り込む正規表現（具体的なものを先に並べる）
+const DATE_RE = /(?:今週|来週|再来週|次の週)?[日月火水木金土]曜日?|明々後日|しあさって|明後日|あさって|明日|あした|今日|本日|今月\d{1,2}日|来月\d{1,2}日|\d{1,2}月\d{1,2}日|\d{1,2}[\/／]\d{1,2}|\d{1,2}日/g;
+
+// 1つの日付表現を YYYY-MM-DD に変換。refDate（範囲の開始日）があれば素の曜日をその週で解決
+function resolveDateToken(tok, base, refDate){
+  base = dayStart(base||new Date());
+  tok = (tok||"").trim();
+  let m;
+  if(/今日|本日/.test(tok)) return ymd(base);
+  if(/明々後日|しあさって/.test(tok)) return ymd(addDays(base,3));
+  if(/明後日|あさって/.test(tok)) return ymd(addDays(base,2));
+  if(/明日|あした/.test(tok)) return ymd(addDays(base,1));
+  if(m=tok.match(/今月(\d{1,2})日/)) return ymd(new Date(base.getFullYear(),base.getMonth(),+m[1]));
+  if(m=tok.match(/来月(\d{1,2})日/)) return ymd(new Date(base.getFullYear(),base.getMonth()+1,+m[1]));
+  if(m=tok.match(/(\d{1,2})月(\d{1,2})日/)){ let d=new Date(base.getFullYear(),+m[1]-1,+m[2]); if(d<base) d=new Date(base.getFullYear()+1,+m[1]-1,+m[2]); return ymd(d); }
+  if(m=tok.match(/(\d{1,2})[\/／](\d{1,2})/)){ let d=new Date(base.getFullYear(),+m[1]-1,+m[2]); if(d<base) d=new Date(base.getFullYear()+1,+m[1]-1,+m[2]); return ymd(d); }
+  if(m=tok.match(/(今週|来週|再来週|次の週)?\s*([日月火水木金土])曜/)){
+    const prefix=m[1], targetDow=WD[m[2]];
+    const ref = refDate ? dayStart(new Date(refDate+"T00:00:00")) : base;
+    const thisMonday = addDays(ref, -((ref.getDay()+6)%7));  // その週の月曜
+    const wdOff = (targetDow+6)%7;                            // 月曜からの曜日オフセット
+    if(prefix) return ymd(addDays(thisMonday, (prefix==="再来週"?2:1)*7 + wdOff));
+    if(refDate) return ymd(addDays(thisMonday, wdOff));        // 範囲の終了日（開始日と同じ週）
+    const diff = (targetDow - base.getDay() + 7)%7;            // 単独の曜日：次の該当日
+    return ymd(addDays(base, diff));
+  }
+  if(m=tok.match(/(\d{1,2})日/)){ let d=new Date(base.getFullYear(),base.getMonth(),+m[1]); if(d<base) d=new Date(base.getFullYear(),base.getMonth()+1,+m[1]); return ymd(d); }
+  return null;
+}
+
+// テキストから日付だけ抽出（期間指定/候補日を自動判定）。日付フィールドの音声入力でも使う
+function extractDates(text, base){
+  base = base || new Date();
+  const res = {dateMode:"", dateFrom:"", dateTo:"", candidateDates:[]};
+  const dm = [...text.matchAll(DATE_RE)];
+  if(dm.length===0) return res;
+  if(dm.length===1){
+    res.dateMode="期間指定"; res.dateFrom = resolveDateToken(dm[0][0], base) || "";
+    return res;
+  }
+  const between = text.slice(dm[0].index+dm[0][0].length, dm[1].index);
+  if(/から|〜|～|~|まで/.test(between)){
+    res.dateMode="期間指定";
+    res.dateFrom = resolveDateToken(dm[0][0], base) || "";
+    res.dateTo   = resolveDateToken(dm[1][0], base, res.dateFrom) || "";
+  }else{
+    res.dateMode="候補日";
+    res.candidateDates = dm.map(x=>resolveDateToken(x[0], base)).filter(Boolean);
+  }
+  return res;
+}
+
+// 音声テキストをローカルで解析してフォーム用オブジェクトを返す
+function parseVoiceLocal(text){
+  const base = new Date();
+  const out = {siteName:"",detail:"",workers:"",dateMode:"期間指定",dateFrom:"",dateTo:"",candidateDates:[]};
+  const ranges = []; // 抽出済み範囲（作業内容抽出時に除外する）
+
+  // 人数（「3から4人」「2〜3人」「5人程度」など。範囲の「から」も拾い、表示は〜に統一）
+  const wm = text.match(/\d+\s*(?:[〜～~ー－\-]|から)\s*\d+\s*人(?:程度|くらい|ぐらい|ほど)?|\d+\s*人(?:程度|くらい|ぐらい|ほど)?|数人|複数人|大勢/);
+  if(wm){ out.workers = wm[0].replace(/\s/g,"").replace(/から/,"〜"); ranges.push([wm.index, wm.index+wm[0].length]); }
+
+  // 現場名（マンション種別・社名キーワード優先 → 「〜の現場」 → 後段で最初の語を採用）
+  //  現場名はほぼマンション名。固有名（サーパス等）は接尾語が無いので最初の語ルールで拾う
+  let sm = text.match(/[^\s、。]*?(?:マンション|ハイツ|コーポ|レジデンス|メゾン|ハイム|パレス|ヒルズ|ハウス|ホーム|建設|工務店|工業|興業|土建|開発|住建|組)[^\s、。]*/);
+  if(sm){ out.siteName = sm[0]; ranges.push([sm.index, sm.index+sm[0].length]); }
+  else if(sm = text.match(/([^\s、。]+?)の現場/)){ out.siteName = sm[1]; ranges.push([sm.index, sm.index+sm[0].length]); }
+
+  // 日付
+  const dm = [...text.matchAll(DATE_RE)];
+  if(dm.length===1){
+    out.dateFrom = resolveDateToken(dm[0][0], base) || "";
+    ranges.push([dm[0].index, dm[0].index+dm[0][0].length]);
+  }else if(dm.length>=2){
+    const between = text.slice(dm[0].index+dm[0][0].length, dm[1].index);
+    if(/から|〜|～|~|まで/.test(between)){           // 期間指定
+      out.dateMode="期間指定";
+      out.dateFrom = resolveDateToken(dm[0][0], base) || "";
+      out.dateTo   = resolveDateToken(dm[1][0], base, out.dateFrom) || "";
+      let rEnd = dm[1].index+dm[1][0].length;
+      if(text.slice(rEnd, rEnd+2)==="まで") rEnd+=2; // 末尾の「まで」も除外
+      ranges.push([dm[0].index, rEnd]);
+    }else{                                            // 候補日
+      out.dateMode="候補日";
+      out.candidateDates = dm.map(x=>resolveDateToken(x[0], base)).filter(Boolean);
+      ranges.push([dm[0].index, dm[dm.length-1].index+dm[dm.length-1][0].length]);
+    }
+  }
+
+  // 作業内容：抽出済み範囲を伏せ字にして、残り全部を内容として採用
+  const chars = text.split("");
+  ranges.forEach(([s,e])=>{ for(let i=s;i<e;i++) chars[i]=" "; });
+  let segs = chars.join("").split(/[ 、。,.\s　]+/)
+    .map(s=>s.replace(/現場/g,"").replace(/^[のでをにはがとへやも・「」]+/,"").replace(/[のでをにはがとへやも・「」]+$/,"").trim())
+    .filter(Boolean);
+  // 現場名が未検出なら、最初に話した語を現場名とみなす（「○○の現場」と言わなくてもOK）
+  if(!out.siteName && segs.length){ out.siteName = segs.shift(); }
+  out.detail = segs.join(" ");
+
+  return out;
+}
+
+// ── 単一フィールド用の音声入力ボタン（マイク） ──────────────
+// 1発話で確定させ、結果テキストを onText で親に返す（重複防止のため単発認識）
+function MicButton({onText}){
+  const [rec, setRec] = useState(false);
+  const ref = useRef(null);
+  const start = () => {
+    const SR = window.SpeechRecognition||window.webkitSpeechRecognition;
+    if(!SR){ alert("このブラウザは音声入力に未対応です"); return; }
+    const r = new SR(); r.lang="ja-JP"; r.continuous=false; r.interimResults=false;
+    r.onresult = e => {
+      let t=""; for(let i=0;i<e.results.length;i++) if(e.results[i].isFinal) t+=e.results[i][0].transcript;
+      t=t.trim(); if(t) onText(t);
+    };
+    r.onerror = ()=> setRec(false);
+    r.onend   = ()=> setRec(false);
+    ref.current=r; r.start(); setRec(true);
+  };
+  const stop = ()=>{ if(ref.current) ref.current.stop(); setRec(false); };
+  return (
+    <button type="button" onClick={rec?stop:start}
+      style={{background:rec?"#7f1d1d":"#1c3a1c",border:`1.5px solid ${rec?"#ef4444":"#4ade80"}`,borderRadius:20,padding:"4px 11px",color:rec?"#ef4444":"#4ade80",fontSize:11,fontWeight:700,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:4,flexShrink:0}}>
+      <span style={{width:7,height:7,borderRadius:"50%",background:rec?"#ef4444":"#4ade80",animation:rec?"pulse 1s infinite":"none",display:"inline-block"}}/>
+      {rec?"停止":"🎤"}
+    </button>
+  );
+}
+
+// ── メインアプリ ──────────────────────────────────
+function App() {
+  const [tasks, setTasksRaw] = useState(() => loadTasks() || DEMO);
+  const setTasks = ts => { setTasksRaw(ts); saveTasks(ts); };
+
+  const [showForm, setShowForm]     = useState(false);
+  const [filterStatus, setFilter]   = useState("全て");
+  const [form, setForm]             = useState(emptyForm());
+  const [detailOpen, setDetailOpen] = useState(null);
+  const [editId, setEditId]         = useState(null);
+
+  // 通常の作業内容音声入力
+  const [recording, setRecording]   = useState(false);
+  const [transcript, setTranscript] = useState("");
+  const [recError, setRecError]     = useState("");
+  const recRef = useRef(null);
+
+  // AI一括音声入力
+  const [aiRec, setAiRec]           = useState(false);      // 録音中
+  const [aiText, setAiText]         = useState("");          // 文字起こし途中
+  const [aiParsing, setAiParsing]   = useState(false);      // AI処理中
+  const [aiError, setAiError]       = useState("");
+  const [aiPreview, setAiPreview]   = useState(null);       // 解析結果プレビュー
+  const aiRecRef  = useRef(null);
+  const aiStopRef = useRef(false);  // ユーザーが停止を押したか（自動再開の制御）
+  const aiAccRef  = useRef("");     // セッションをまたいで蓄積する確定テキスト
+
+  const nextId = useRef(Math.max(...(loadTasks()||DEMO).map(x=>x.id), 99)+1);
+  const setF = (k,v) => setForm(f=>({...f,[k]:v}));
+  // 各フィールドの音声入力：既存の値があれば空白を挟んで追記
+  const appendF = (k,t) => setForm(f=>({...f,[k]:(f[k]?f[k]+" ":"")+t}));
+  // 日付フィールドの音声入力：話した内容から日付を解析して反映
+  const applyDateSpeech = t => {
+    const d = extractDates(t);
+    if(!d.dateMode){ return; }
+    setForm(f=>{
+      if(d.dateMode==="候補日") return {...f,dateMode:"候補日",candidateDates:d.candidateDates.length?d.candidateDates:[""]};
+      return {...f,dateMode:"期間指定",dateFrom:d.dateFrom||f.dateFrom,dateTo:d.dateTo||""};
+    });
+  };
+
+  // 候補日操作
+  const setCandDate = (i,v) => { const a=[...(form.candidateDates||[])]; a[i]=v; setF("candidateDates",a); };
+  const addCandDate = () => setF("candidateDates",[...(form.candidateDates||[]),""]); 
+  const rmCandDate  = i => { const a=[...(form.candidateDates||[])]; a.splice(i,1); setF("candidateDates",a); };
+
+  // 通常音声（作業内容欄）
+  const startRec = () => {
+    setRecError("");
+    const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+    if(!SR){setRecError("このブラウザは音声入力に未対応です");return;}
+    const rec=new SR(); rec.lang="ja-JP"; rec.continuous=false; rec.interimResults=true;
+    let finalText="";
+    rec.onresult=e=>{
+      // 毎回 全結果から組み立て直す（同じ語が重複加算されるのを防ぐ）
+      let interim=""; finalText="";
+      for(let i=0;i<e.results.length;i++){
+        const t=e.results[i][0].transcript;
+        if(e.results[i].isFinal) finalText+=t; else interim+=t;
+      }
+      setTranscript(finalText+interim);
+    };
+    rec.onerror=e=>{setRecError("音声エラー: "+e.error);setRecording(false);};
+    rec.onend=()=>{
+      setRecording(false);
+      const t=finalText.trim();
+      if(t) setForm(f=>({...f,detail:f.detail+(f.detail?"　":"")+t}));
+      setTranscript("");
+    };
+    recRef.current=rec; rec.start(); setRecording(true);
+  };
+  const stopRec = () => { recRef.current?.stop(); setRecording(false); };
+
+  // AI一括音声録音
+  // スマホ(Android/iOSのChrome)は continuous=true だと確定語を何度も再報告して
+  // 「現場現場現場…」のように重複する。対策として continuous=false（1発話ごと）にし、
+  // ユーザーが停止するまで onend で自動再開して長文に対応する。
+  const startAiRec = () => {
+    setAiError(""); setAiText(""); setAiPreview(null);
+    const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+    if(!SR){setAiError("このブラウザは音声入力に未対応です");return;}
+    aiStopRef.current=false; aiAccRef.current="";
+
+    const launch = () => {
+      const rec=new SR(); rec.lang="ja-JP"; rec.continuous=false; rec.interimResults=true;
+      let seg="";  // このセッションの確定テキスト
+      rec.onresult=e=>{
+        let interim=""; seg="";
+        for(let i=0;i<e.results.length;i++){
+          const t=e.results[i][0].transcript;
+          if(e.results[i].isFinal) seg+=t; else interim+=t;
+        }
+        setAiText((aiAccRef.current+seg+interim).trim());
+      };
+      rec.onerror=e=>{
+        if(e.error==="no-speech"||e.error==="aborted") return; // 無音・中断は無視して再開に任せる
+        aiStopRef.current=true; setAiError("音声エラー: "+e.error);
+      };
+      rec.onend=()=>{
+        aiAccRef.current += seg;                       // 確定分を蓄積
+        if(!aiStopRef.current){                         // 停止していなければ続けて聞く
+          try{ const r=launch(); aiRecRef.current=r; r.start(); return; }catch(_){}
+        }
+        setAiRec(false);
+        const text=aiAccRef.current.trim();
+        if(!text){setAiError("音声が認識できませんでした");return;}
+        setAiParsing(true);
+        try{ setAiPreview(parseVoiceLocal(text)); }
+        catch(e){ setAiError("解析エラー: "+e.message); }
+        finally{ setAiParsing(false); }
+      };
+      return rec;
+    };
+
+    try{ aiRecRef.current=launch(); aiRecRef.current.start(); setAiRec(true); }
+    catch(e){ setAiError("音声を開始できませんでした: "+e.message); }
+  };
+  const stopAiRec = () => { aiStopRef.current=true; if(aiRecRef.current) aiRecRef.current.stop(); };
+
+  // プレビューを採用してフォームに反映
+  const applyAiPreview = () => {
+    if(!aiPreview) return;
+    const p=aiPreview;
+    setForm({
+      siteName:  p.siteName||"",
+      detail:    p.detail||"",
+      workers:   p.workers||"",
+      dateMode:  p.dateMode==="候補日"?"候補日":"期間指定",
+      dateFrom:  p.dateFrom||today(),
+      dateTo:    p.dateTo||"",
+      candidateDates: (p.candidateDates||[]).length>0 ? p.candidateDates : [""],
+    });
+    setAiPreview(null); setAiText(""); setShowForm(true); setEditId(null);
+  };
+
+  const canSubmit = !!(form.siteName.trim() || form.detail.trim());
+  const handleSubmit = () => {
+    if(!canSubmit) return;
+    if(editId!==null){
+      setTasks(tasks.map(t=>t.id===editId?{...t,...form}:t)); setEditId(null);
+    }else{
+      setTasks([...tasks,{...form,id:nextId.current++,status:"未着手",createdAt:Date.now()}]);
+    }
+    setForm(emptyForm()); setShowForm(false); setTranscript("");
+  };
+
+  const handleEdit = task => {
+    setForm({siteName:task.siteName||"",detail:task.detail||"",workers:task.workers||"",dateMode:task.dateMode||"期間指定",dateFrom:task.dateFrom||"",dateTo:task.dateTo||"",candidateDates:task.candidateDates||[""]});
+    setEditId(task.id); setShowForm(true); setDetailOpen(null);
+  };
+  const handleDelete = id => { setTasks(tasks.filter(t=>t.id!==id)); setDetailOpen(null); };
+  const handleStatus = (id,s) => setTasks(tasks.map(t=>t.id===id?{...t,status:s}:t));
+
+  const filtered = tasks.filter(t=>filterStatus==="全て"||t.status===filterStatus)
+    .sort((a,b)=>b.createdAt-a.createdAt);
+  const counts = STATUSES.reduce((acc,s)=>({...acc,[s]:tasks.filter(t=>t.status===s).length}),{});
+
+  // ── レンダリング ──────────────────────────────────
+  return (
+    <div style={{minHeight:"100vh",background:"#111"}}>
+
+      {/* ヘッダー */}
+      <div style={{background:"linear-gradient(135deg,#1a1a1a,#0d0d0d)",borderBottom:"2px solid #f97316",padding:"16px 20px",paddingTop:"calc(16px + env(safe-area-inset-top,0px))",position:"sticky",top:0,zIndex:50}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <div style={{width:36,height:36,background:"#f97316",borderRadius:6,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>🏗️</div>
+            <div>
+              <div style={{fontSize:16,fontWeight:700,color:"#fff"}}>現場 タスク管理</div>
+              <div style={{fontSize:11,color:"#888",letterSpacing:"0.1em"}}>GENBA TASK MANAGER</div>
+            </div>
+          </div>
+          <button onClick={()=>{setForm(emptyForm());setEditId(null);setShowForm(true);}}
+            style={{background:"#f97316",color:"#fff",border:"none",borderRadius:8,padding:"8px 14px",fontWeight:700,fontSize:14,cursor:"pointer"}}>
+            ＋ 追加
+          </button>
+        </div>
+      </div>
+
+      {/* AI一括音声入力パネル（常時表示） */}
+      <div style={{margin:"14px 16px 0",background:"#0d1a0d",border:`1.5px solid ${aiRec?"#4ade80":"#1a3a1a"}`,borderRadius:14,padding:"14px 16px"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+          <div style={{fontSize:13,fontWeight:700,color:"#4ade80"}}>🎤 音声で一括登録</div>
+          <button onClick={aiRec?stopAiRec:startAiRec} disabled={aiParsing}
+            style={{background:aiRec?"#7f1d1d":aiParsing?"#222":"#1a3a1a",border:`1.5px solid ${aiRec?"#ef4444":aiParsing?"#444":"#4ade80"}`,borderRadius:20,padding:"6px 14px",color:aiRec?"#ef4444":aiParsing?"#666":"#4ade80",fontSize:12,fontWeight:700,cursor:aiParsing?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:6}}>
+            {aiParsing
+              ? <><span className="spinner"/> 解析中…</>
+              : aiRec
+                ? <><span style={{width:8,height:8,borderRadius:"50%",background:"#ef4444",animation:"pulse 1s infinite",display:"inline-block"}}/> 停止して解析</>
+                : "話して登録"}
+          </button>
+        </div>
+        <div style={{fontSize:11,color:"#4a7a4a",lineHeight:1.6}}>
+          例：「〇〇建設の現場で来週月曜から水曜、配管交換、2〜3人」と話すと自動でフォームに入力されます（無料・オフライン対応）
+        </div>
+        {aiText&&(
+          <div style={{marginTop:10,background:"#0a140a",borderRadius:8,padding:"8px 12px",fontSize:13,color:"#86efac",lineHeight:1.6}}>
+            🎤 {aiText}
+          </div>
+        )}
+        {aiError&&(
+          <div style={{marginTop:8,background:"#1f0d0d",border:"1px solid #ef444444",borderRadius:8,padding:"8px 12px",fontSize:12,color:"#ef4444"}}>⚠️ {aiError}</div>
+        )}
+        {/* AIプレビュー */}
+        {aiPreview&&(
+          <div style={{marginTop:10,background:"#111",border:"1px solid #f9731644",borderRadius:10,padding:"12px"}}>
+            <div style={{fontSize:12,color:"#f97316",fontWeight:700,marginBottom:8}}>✨ 解析結果 — 確認して登録</div>
+            {[
+              ["📍 現場名", aiPreview.siteName],
+              ["👷 人数",   aiPreview.workers],
+              ["📅 日付",   aiPreview.dateMode==="候補日"
+                ? "候補: "+(aiPreview.candidateDates||[]).filter(Boolean).map(fmtDate).join(" / ")
+                : aiPreview.dateFrom?(aiPreview.dateTo?`${fmtDate(aiPreview.dateFrom)}〜${fmtDate(aiPreview.dateTo)}`:`${fmtDate(aiPreview.dateFrom)}〜`):""],
+              ["📝 内容",   aiPreview.detail],
+            ].filter(([,v])=>v).map(([label,val])=>(
+              <div key={label} style={{display:"flex",gap:8,marginBottom:5,fontSize:13}}>
+                <span style={{color:"#888",minWidth:64,flexShrink:0}}>{label}</span>
+                <span style={{color:"#e5e5e5"}}>{val}</span>
+              </div>
+            ))}
+            <div style={{display:"flex",gap:8,marginTop:12}}>
+              <button onClick={applyAiPreview}
+                style={{flex:1,background:"#f97316",color:"#fff",border:"none",borderRadius:8,padding:"9px",fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                ✅ この内容で登録
+              </button>
+              <button onClick={()=>{setAiPreview(null);setAiText("");}}
+                style={{flex:1,background:"#2a2a2a",color:"#aaa",border:"none",borderRadius:8,padding:"9px",fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                やり直す
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* サマリー */}
+      <div style={{display:"flex",gap:8,padding:"12px 16px 0",overflowX:"auto"}}>
+        {STATUSES.map(s=>(
+          <div key={s} onClick={()=>setFilter(f=>f===s?"全て":s)}
+            style={{flex:1,minWidth:80,background:filterStatus===s?STATUS_COLORS[s].bg:"#1e1e1e",border:`1.5px solid ${filterStatus===s?STATUS_COLORS[s].dot:"#2a2a2a"}`,borderRadius:10,padding:"10px 12px",cursor:"pointer"}}>
+            <div style={{fontSize:20,fontWeight:800,color:STATUS_COLORS[s].dot}}>{counts[s]}</div>
+            <div style={{fontSize:11,color:"#aaa",marginTop:2}}>{s}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* タスクリスト */}
+      <div style={{padding:"12px 16px 100px"}}>
+        {filtered.length===0&&(
+          <div style={{textAlign:"center",color:"#555",padding:"60px 0",fontSize:14}}>
+            <div style={{fontSize:40}}>📋</div>
+            <div style={{marginTop:8}}>依頼がありません</div>
+          </div>
+        )}
+        {filtered.map(task=>(
+          <div key={task.id} style={{background:"#1a1a1a",border:"1px solid #2a2a2a",borderLeft:"4px solid #f97316",borderRadius:12,marginBottom:10,overflow:"hidden"}}>
+            <div onClick={()=>setDetailOpen(detailOpen===task.id?null:task.id)}
+              style={{padding:"14px 16px",cursor:"pointer",display:"flex",alignItems:"flex-start",gap:12}}>
+              <div style={{flex:1,minWidth:0}}>
+                {task.siteName&&<div style={{fontSize:15,color:"#f97316",fontWeight:700,marginBottom:3}}>📍 {task.siteName}</div>}
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4,flexWrap:"wrap"}}>
+                  {task.workers&&<span style={{background:"#252525",color:"#aaa",fontSize:11,padding:"2px 8px",borderRadius:4}}>👷 {task.workers}</span>}
+                  {dateLabel(task)&&<span style={{color:"#666",fontSize:11}}>📅 {dateLabel(task)}</span>}
+                </div>
+                <div style={{fontWeight:700,fontSize:12,color:task.detail?"#f0f0f0":"#555",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{task.detail||"（作業内容なし）"}</div>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6,flexShrink:0}}>
+                <div style={{background:STATUS_COLORS[task.status].bg,color:STATUS_COLORS[task.status].text,fontSize:11,padding:"3px 9px",borderRadius:20,fontWeight:700,display:"flex",alignItems:"center",gap:4}}>
+                  <div style={{width:6,height:6,borderRadius:"50%",background:STATUS_COLORS[task.status].dot}}/>
+                  {task.status}
+                </div>
+                <div style={{fontSize:16,color:"#444"}}>{detailOpen===task.id?"▲":"▼"}</div>
+              </div>
+            </div>
+            {detailOpen===task.id&&(
+              <div style={{borderTop:"1px solid #2a2a2a",padding:"12px 16px",background:"#141414"}}>
+                {task.dateMode==="期間指定"&&task.dateFrom&&(
+                  <div style={{fontSize:13,color:"#aaa",marginBottom:8}}>📅 期間：{fmtDate(task.dateFrom)}{task.dateTo?`〜${fmtDate(task.dateTo)}`:"〜（未定）"}</div>
+                )}
+                {task.dateMode==="候補日"&&(task.candidateDates||[]).filter(Boolean).length>0&&(
+                  <div style={{fontSize:13,color:"#aaa",marginBottom:8}}>📅 候補日：{task.candidateDates.filter(Boolean).map(fmtDate).join("　/　")}</div>
+                )}
+                {task.detail&&<div style={{fontSize:13,color:"#bbb",marginBottom:12,lineHeight:1.7}}>{task.detail}</div>}
+                <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>
+                  {STATUSES.map(s=>(
+                    <button key={s} onClick={()=>handleStatus(task.id,s)}
+                      style={{padding:"5px 12px",borderRadius:20,border:"1.5px solid",borderColor:task.status===s?STATUS_COLORS[s].dot:"#333",background:task.status===s?STATUS_COLORS[s].bg:"transparent",color:task.status===s?STATUS_COLORS[s].text:"#666",fontSize:12,fontWeight:600,cursor:"pointer"}}>{s}</button>
+                  ))}
+                </div>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>handleEdit(task)} style={{flex:1,background:"#2a2a2a",color:"#aaa",border:"none",borderRadius:8,padding:"8px",fontSize:13,cursor:"pointer",fontWeight:600}}>✏️ 編集</button>
+                  <button onClick={()=>handleDelete(task.id)} style={{flex:1,background:"#3b1515",color:"#f87171",border:"none",borderRadius:8,padding:"8px",fontSize:13,cursor:"pointer",fontWeight:600}}>🗑️ 削除</button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* 手動入力モーダル */}
+      {showForm&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:100,display:"flex",alignItems:"flex-end"}}
+          onClick={e=>{if(e.target===e.currentTarget){setShowForm(false);setTranscript("");}}}>
+          <div className="modal-sheet" style={{width:"100%",maxWidth:600,margin:"0 auto",background:"#1a1a1a",borderRadius:"20px 20px 0 0",border:"1px solid #2a2a2a",borderBottom:"none",padding:"20px 20px 20px",paddingBottom:"calc(20px + env(safe-area-inset-bottom,0px))",maxHeight:"92vh",overflowY:"auto"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+              <div style={{fontWeight:800,fontSize:16,color:"#f97316"}}>{editId!==null?"✏️ 依頼を編集":"＋ 新規依頼"}</div>
+              <button onClick={()=>{setShowForm(false);setTranscript("");}}
+                style={{background:"#2a2a2a",border:"none",color:"#888",borderRadius:"50%",width:30,height:30,fontSize:16,cursor:"pointer"}}>×</button>
+            </div>
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+              <label style={{...LS,marginBottom:0}}>📍 現場名</label>
+              <MicButton onText={t=>appendF("siteName",t)}/>
+            </div>
+            <input value={form.siteName} onChange={e=>setF("siteName",e.target.value)} placeholder="例：山田工務店 第1現場" style={{...IS,marginBottom:14}}/>
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+              <label style={{...LS,marginBottom:0}}>👷 人数</label>
+              <MicButton onText={t=>appendF("workers",t)}/>
+            </div>
+            <input value={form.workers} onChange={e=>setF("workers",e.target.value)} placeholder="例：2〜3人、5人程度、1人" style={{...IS,marginBottom:14}}/>
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+              <label style={{...LS,marginBottom:0}}>📅 日付</label>
+              <MicButton onText={applyDateSpeech}/>
+            </div>
+            <div style={{display:"flex",gap:6,marginBottom:12}}>
+              {DATE_MODES.map(m=>(
+                <button key={m} onClick={()=>setF("dateMode",m)}
+                  style={{flex:1,padding:"7px",borderRadius:8,border:"1.5px solid",borderColor:form.dateMode===m?"#60a5fa":"#333",background:form.dateMode===m?"#1e3a5f":"transparent",color:form.dateMode===m?"#60a5fa":"#666",fontSize:13,fontWeight:700,cursor:"pointer"}}>{m}</button>
+              ))}
+            </div>
+            {form.dateMode==="期間指定"&&(
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
+                <input type="date" value={form.dateFrom} onChange={e=>setF("dateFrom",e.target.value)} style={{...IS,flex:1}}/>
+                <span style={{color:"#555",fontSize:14,flexShrink:0}}>〜</span>
+                <input type="date" value={form.dateTo} onChange={e=>setF("dateTo",e.target.value)} style={{...IS,flex:1}}/>
+              </div>
+            )}
+            {form.dateMode==="候補日"&&(
+              <div style={{marginBottom:14}}>
+                {(form.candidateDates||[""]).map((d,i)=>(
+                  <div key={i} style={{display:"flex",gap:8,marginBottom:8,alignItems:"center"}}>
+                    <span style={{color:"#555",fontSize:12,minWidth:24}}>第{i+1}</span>
+                    <input type="date" value={d} onChange={e=>setCandDate(i,e.target.value)} style={{...IS,flex:1}}/>
+                    {(form.candidateDates||[]).length>1&&(
+                      <button onClick={()=>rmCandDate(i)} style={{background:"#3b1515",border:"none",color:"#f87171",borderRadius:6,padding:"6px 10px",cursor:"pointer",fontSize:14}}>✕</button>
+                    )}
+                  </div>
+                ))}
+                <button onClick={addCandDate} style={{background:"transparent",border:"1.5px dashed #333",borderRadius:8,color:"#888",padding:"7px 14px",fontSize:13,cursor:"pointer",width:"100%"}}>＋ 候補日を追加</button>
+              </div>
+            )}
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+              <label style={{...LS,marginBottom:0}}>作業内容・メモ</label>
+              <button onClick={recording?stopRec:startRec}
+                style={{background:recording?"#7f1d1d":"#1c3a1c",border:`1.5px solid ${recording?"#ef4444":"#4ade80"}`,borderRadius:20,padding:"5px 12px",color:recording?"#ef4444":"#4ade80",fontSize:12,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",gap:5}}>
+                <span style={{width:8,height:8,borderRadius:"50%",background:recording?"#ef4444":"#4ade80",animation:recording?"pulse 1s infinite":"none",display:"inline-block"}}/>
+                {recording?"● 停止":"🎤 音声"}
+              </button>
+            </div>
+            {transcript&&<div style={{background:"#0d1f0d",border:"1px solid #4ade8044",borderRadius:8,padding:"8px 12px",marginBottom:8,fontSize:13,color:"#4ade80"}}>🎤 {transcript}</div>}
+            {recError&&<div style={{background:"#1f0d0d",borderRadius:8,padding:"8px 12px",marginBottom:8,fontSize:12,color:"#ef4444"}}>⚠️ {recError}</div>}
+            <textarea value={form.detail} onChange={e=>setF("detail",e.target.value)} placeholder="作業内容の詳細" rows={3}
+              style={{...IS,marginBottom:18,resize:"vertical"}}/>
+
+            <button onClick={handleSubmit} disabled={!canSubmit}
+              style={{width:"100%",background:canSubmit?"#f97316":"#333",color:canSubmit?"#fff":"#666",border:"none",borderRadius:10,padding:"14px",fontWeight:800,fontSize:16,cursor:canSubmit?"pointer":"not-allowed"}}>
+              {editId!==null?"✅ 更新する":"✅ 依頼を追加"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("app")).render(<App/>);
+</script>
+<script>
+if("serviceWorker" in navigator){
+  navigator.serviceWorker.register("sw.js").catch(()=>{});
+}
+</script>
+</body>
+</html>

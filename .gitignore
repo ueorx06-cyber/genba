@@ -1,0 +1,9 @@
+# Claude Code のローカル設定（公開不要）
+.claude/
+
+# 開発用の一時ファイル（アプリ本体には不要）
+Screenshot*.jpg
+Screenshot*.png
+*.tmp
+.DS_Store
+Thumbs.db
