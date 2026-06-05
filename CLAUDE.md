@@ -205,6 +205,25 @@ headers: {
 
 ---
 
+### フェーズ8：git自動デプロイ化・Service Workerのキャッシュ対策（2026年6月5日）
+
+**背景：** これまではGitHubのWeb画面で手動アップロードしており、加えてスマホで更新が反映されない（要キャッシュ削除）問題があった。
+
+**変更内容：**
+1. **git連携でデプロイ自動化（ホストはGitHub Pagesのまま）**
+   - プロジェクトフォルダを `git init`（`main`）、リモート `github.com/ueorx06-cyber/genba` に接続。認証は Git Credential Manager（Git for Windows同梱）で初回ログイン済み、以降不要。
+   - `.gitignore` で `.claude/`・`deploy.bat`・スクショ等を除外。公開は6ファイルのみ。
+   - **`deploy.bat`（ダブルクリックで `add`→`commit`→`push`）を作成**。今後はこれ1回でデプロイ。
+2. **Service Workerのキャッシュ戦略を変更（`sw.js`）**
+   - 旧：全リクエストが **cache-first** ＋ キャッシュ名固定（`genba-v1`）→ 一度キャッシュした `index.html` を永久に返し、更新が出ない原因だった。
+   - 新：**HTML（ページ遷移）はネットワーク優先**＝オンライン時は常に最新を取得し、取得失敗時のみキャッシュにフォールバック（オフライン対応は維持）。manifest・アイコン等はcache-firstのまま。
+   - さらに `deploy.bat` がデプロイのたびに **`sw.js` のキャッシュ名を現在時刻（`genba-vYYYYMMDDHHmmss`）へ自動更新**。sw.js自体が毎回変わるのでSWが確実に更新され、古いキャッシュも `activate` で削除される。
+   - 置換コマンド（deploy.bat内）：正規表現 `genba-v[0-9A-Za-z_]+` を新しいタイムスタンプに置換し、**UTF-8 (BOMなし)** で書き戻す。
+
+**注意：** この新方式を**初めて適用する時だけ**、スマホ側に旧SW（cache-first）が残っているため一度キャッシュ削除/再読込が要る場合がある。それ以降は自動で最新化される。
+
+---
+
 ## 重要な知識・注意点
 
 ### 音声一括登録はローカル解析（APIキー・課金なし）
@@ -219,7 +238,12 @@ headers: {
 - スマホ（Android/iOSのChrome・Safari）は `continuous=true` で確定語を再報告し、語が大量に重複する。
 - 連続的に聞きたい場合は **`continuous=false`（1発話ごと）＋ `onend` で自動再開** を使う（`startAiRec` 参照）。停止フラグはrefで持ち、確定テキストもrefに蓄積する。
 - 単発入力（`MicButton`）は `continuous=false` / `interimResults=false` で重複しない。
-- **デプロイ後の反映にはキャッシュ削除が必要**：PWAのService Workerが `index.html` をキャッシュするため、特にスマホは古いまま開かれる。アップロード後はキャッシュ削除/PWA入れ直しを案内すること。
+
+### Service Worker のキャッシュ（フェーズ8で対策済み）
+
+- `sw.js` は **HTMLはネットワーク優先＋オフライン時のみキャッシュ**。さらに `deploy.bat` がデプロイ毎にキャッシュ名を更新するため、通常はキャッシュ削除なしで最新が反映される。
+- この方式を **初適用する時だけ** 旧SWが残っているスマホで一度キャッシュ削除/再読込が要る場合あり。
+- `sw.js` を cache-first に戻さないこと（更新が出なくなる）。
 
 ### データ構造（タスクオブジェクト）
 
@@ -248,13 +272,24 @@ const STORAGE_KEY = "genba_tasks_v2";
 
 ## GitHub Pagesへのデプロイ手順
 
-`index.html` を修正したら：
+**git連携済み（フェーズ8）。ファイルを修正したら `deploy.bat` をダブルクリックするだけ。**
 
-1. GitHubの `genba` リポジトリを開く
-2. `index.html` → 右上の鉛筆アイコン（Edit）または「Upload files」で上書き
-3. 「Commit changes」→ 1〜2分で反映
+```
+C:\Users\uenou\Documents\Claude\genba_kanri\deploy.bat
+```
 
-`sw.js` `manifest.json` `icon192.png` `icon512.png` は変更不要。
+`deploy.bat` の処理：
+1. `sw.js` のキャッシュ名を現在時刻に自動更新（スマホのキャッシュ対策）
+2. `git add -A` → `git commit` → `git push origin main`
+3. 1〜2分で `https://ueorx06-cyber.github.io/genba/` に反映
+
+**リポジトリ：** `github.com/ueorx06-cyber/genba`（`main`ブランチからPages配信）。
+**認証：** 初回プッシュで Git Credential Manager にログイン済み。以降は不要。
+**公開対象：** `index.html / manifest.json / sw.js / icon-192.png / icon-512.png / CLAUDE.md`。
+`.claude/`（ローカル設定）・`deploy.bat`・スクショは `.gitignore` で除外。
+
+> 手動でやる場合：`git add -A; git commit -m "..."; git push origin main`
+> Claudeに「デプロイして」と頼めば代わりにpushも可能。
 
 ---
 
