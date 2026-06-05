@@ -1,6 +1,9 @@
 # Claude Code のローカル設定（公開不要）
 .claude/
 
+# デプロイ用ローカルスクリプト（公開サイトには不要）
+deploy.bat
+
 # 開発用の一時ファイル（アプリ本体には不要）
 Screenshot*.jpg
 Screenshot*.png
