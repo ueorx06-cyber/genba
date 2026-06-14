@@ -1,5 +1,5 @@
 // キャッシュ名はデプロイのたびに deploy.bat が現在時刻へ自動更新する（スマホのキャッシュ対策）
-const CACHE = "genba-v20260605212237";
+const CACHE = "genba-v20260614154113";
 const ASSETS = ["./index.html", "./manifest.json"];
 
 self.addEventListener("install", e => {

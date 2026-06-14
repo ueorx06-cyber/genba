@@ -56,6 +56,12 @@ const dateLabel = task => {
   const days=(task.candidateDates||[]).filter(Boolean);
   return days.length ? days.map(fmtDate).join(" / ") : "";
 };
+// ソート用：期間指定はdateFrom、候補日は最も早い候補日。日付未設定は末尾に回す
+const sortDate = task => {
+  if(task.dateMode==="期間指定") return task.dateFrom || "9999-12-31";
+  const days=(task.candidateDates||[]).filter(Boolean).sort();
+  return days.length ? days[0] : "9999-12-31";
+};
 const emptyForm = () => ({siteName:"",detail:"",workers:"",dateMode:"期間指定",dateFrom:today(),dateTo:"",candidateDates:[""]});
 
 const STORAGE_KEY = "genba_tasks_v2";
@@ -362,7 +368,7 @@ function App() {
   const handleStatus = (id,s) => setTasks(tasks.map(t=>t.id===id?{...t,status:s}:t));
 
   const filtered = tasks.filter(t=>filterStatus==="全て"||t.status===filterStatus)
-    .sort((a,b)=>b.createdAt-a.createdAt);
+    .sort((a,b)=>{ const d=sortDate(a).localeCompare(sortDate(b)); return d!==0?d:b.createdAt-a.createdAt; });
   const counts = STATUSES.reduce((acc,s)=>({...acc,[s]:tasks.filter(t=>t.status===s).length}),{});
 
   // ── レンダリング ──────────────────────────────────
@@ -468,7 +474,7 @@ function App() {
                 {task.siteName&&<div style={{fontSize:15,color:"#f97316",fontWeight:700,marginBottom:3}}>📍 {task.siteName}</div>}
                 <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4,flexWrap:"wrap"}}>
                   {task.workers&&<span style={{background:"#252525",color:"#aaa",fontSize:11,padding:"2px 8px",borderRadius:4}}>👷 {task.workers}</span>}
-                  {dateLabel(task)&&<span style={{color:"#666",fontSize:11}}>📅 {dateLabel(task)}</span>}
+                  {dateLabel(task)&&<span style={{color:"#bbb",fontSize:13,fontWeight:600}}>📅 {dateLabel(task)}</span>}
                 </div>
                 <div style={{fontWeight:700,fontSize:12,color:task.detail?"#f0f0f0":"#555",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{task.detail||"（作業内容なし）"}</div>
               </div>
