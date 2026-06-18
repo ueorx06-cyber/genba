@@ -138,8 +138,56 @@ function extractDates(text, base){
   return res;
 }
 
+// ラベル指定の解析。「現場名 ○○ 人数 3人 日付 来週月曜 作業内容 配管交換」のように
+// 項目名を区切りとして話した場合、その直後の語を各項目に割り当てる。
+// 明示ラベルが無ければ null を返し、従来の自動推定にフォールバックする。
+function parseVoiceLabeled(text){
+  const base = new Date();
+  // 明示ラベル（フィールド名）が1つでもあればラベルモードに入る
+  const STRONG = /(現場名|物件名|作業内容|人数|人員|日付|日にち|日程|期間|予定日|メモ|備考)/;
+  if(!STRONG.test(text)) return null;
+  // 区切りとして認識する語（長いものを先に＝「現場名」を「現場」より優先）
+  const SPLIT = /(作業内容|現場名|物件名|予定日|日にち|現場|物件|場所|人数|人員|日付|日程|期間|予定|作業|内容|メモ|備考)/g;
+  const keyOf = kw => {
+    if(/現場名|現場|物件名|物件|場所/.test(kw)) return "siteName";
+    if(/人数|人員/.test(kw))                    return "workers";
+    if(/日付|日にち|日程|期間|予定日|予定/.test(kw)) return "date";
+    return "detail"; // 作業内容 / 作業 / 内容 / メモ / 備考
+  };
+  const marks=[]; let m;
+  while(m=SPLIT.exec(text)){ marks.push({key:keyOf(m[0]), start:m.index, end:m.index+m[0].length}); }
+  if(!marks.length) return null;
+
+  const out={siteName:"",detail:"",workers:"",dateMode:"期間指定",dateFrom:"",dateTo:"",candidateDates:[]};
+  const details=[];
+  const clean = s => s.replace(/^[はがをにのへとや、。・：:\s　]+/,"").replace(/[、。・\s　]+$/,"").trim();
+  // 最初のラベルより前に話した語があれば現場名の候補にする（先に現場名を言うケース）
+  const pre = clean(text.slice(0, marks[0].start));
+  for(let i=0;i<marks.length;i++){
+    const seg = text.slice(marks[i].end, i+1<marks.length ? marks[i+1].start : text.length);
+    const val = clean(seg);
+    if(!val) continue;
+    const key=marks[i].key;
+    if(key==="siteName"){ out.siteName = out.siteName ? out.siteName+" "+val : val; }
+    else if(key==="workers"){
+      const wm=val.match(/\d+\s*(?:[〜～~ー－\-]|から)\s*\d+\s*人(?:程度|くらい|ぐらい|ほど)?|\d+\s*人(?:程度|くらい|ぐらい|ほど)?|数人|複数人|大勢/);
+      out.workers = wm ? wm[0].replace(/\s/g,"").replace(/から/,"〜") : val;
+    }
+    else if(key==="date"){
+      const d=extractDates(val, base);
+      if(d.dateMode){ out.dateMode=d.dateMode; out.dateFrom=d.dateFrom; out.dateTo=d.dateTo; out.candidateDates=d.candidateDates; }
+    }
+    else { details.push(val); }
+  }
+  if(!out.siteName && pre) out.siteName = pre;
+  out.detail = details.join(" ");
+  return out;
+}
+
 // 音声テキストをローカルで解析してフォーム用オブジェクトを返す
 function parseVoiceLocal(text){
+  const labeled = parseVoiceLabeled(text);   // ラベル指定があれば優先
+  if(labeled) return labeled;
   const base = new Date();
   const out = {siteName:"",detail:"",workers:"",dateMode:"期間指定",dateFrom:"",dateTo:"",candidateDates:[]};
   const ranges = []; // 抽出済み範囲（作業内容抽出時に除外する）
@@ -407,7 +455,8 @@ function App() {
           </button>
         </div>
         <div style={{fontSize:11,color:"#4a7a4a",lineHeight:1.6}}>
-          例：「〇〇建設の現場で来週月曜から水曜、配管交換、2〜3人」と話すと自動でフォームに入力されます（無料・オフライン対応）
+          ① おまかせ：「〇〇マンションで来週月曜から水曜、配管交換、2〜3人」<br/>
+          ② ラベル指定（確実）：「<b style={{color:"#86efac"}}>現場名</b> サーパス柳ヶ崎 <b style={{color:"#86efac"}}>日付</b> 来週月曜 <b style={{color:"#86efac"}}>作業内容</b> 配管交換 <b style={{color:"#86efac"}}>人数</b> 3人」のように項目名を言ってから内容を話すと、その項目に振り分けます（無料・オフライン対応）
         </div>
         {aiText&&(
           <div style={{marginTop:10,background:"#0a140a",borderRadius:8,padding:"8px 12px",fontSize:13,color:"#86efac",lineHeight:1.6}}>
