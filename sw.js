@@ -1,6 +1,13 @@
 // キャッシュ名はデプロイのたびに deploy.bat が現在時刻へ自動更新する（スマホのキャッシュ対策）
-const CACHE = "genba-v20260614154113";
-const ASSETS = ["./index.html", "./manifest.json"];
+const CACHE = "genba-v20260618201520";
+const ASSETS = [
+  "./index.html",
+  "./manifest.json",
+  // CDN（React/ReactDOM/Babel）もキャッシュ＝オフラインやunpkg不調でも起動できる
+  "https://unpkg.com/react@18.3.1/umd/react.production.min.js",
+  "https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js",
+  "https://unpkg.com/@babel/standalone@7.26.4/babel.min.js",
+];
 
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
