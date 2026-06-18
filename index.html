@@ -122,19 +122,19 @@ function extractDates(text, base){
   const res = {dateMode:"", dateFrom:"", dateTo:"", candidateDates:[]};
   const dm = [...text.matchAll(DATE_RE)];
   if(dm.length===0) return res;
-  if(dm.length===1){
-    res.dateMode="期間指定"; res.dateFrom = resolveDateToken(dm[0][0], base) || "";
-    return res;
+  // 「○月○日 から ○月○日」のように2つの日付が範囲マーカーで繋がった時だけ期間指定
+  if(dm.length>=2){
+    const between = text.slice(dm[0].index+dm[0][0].length, dm[1].index);
+    if(/から|〜|～|~|まで/.test(between)){
+      res.dateMode="期間指定";
+      res.dateFrom = resolveDateToken(dm[0][0], base) || "";
+      res.dateTo   = resolveDateToken(dm[1][0], base, res.dateFrom) || "";
+      return res;
+    }
   }
-  const between = text.slice(dm[0].index+dm[0][0].length, dm[1].index);
-  if(/から|〜|～|~|まで/.test(between)){
-    res.dateMode="期間指定";
-    res.dateFrom = resolveDateToken(dm[0][0], base) || "";
-    res.dateTo   = resolveDateToken(dm[1][0], base, res.dateFrom) || "";
-  }else{
-    res.dateMode="候補日";
-    res.candidateDates = dm.map(x=>resolveDateToken(x[0], base)).filter(Boolean);
-  }
+  // それ以外（単一の日付・範囲マーカーなしの複数）は候補日に入れる
+  res.dateMode="候補日";
+  res.candidateDates = dm.map(x=>resolveDateToken(x[0], base)).filter(Boolean);
   return res;
 }
 
@@ -202,21 +202,23 @@ function parseVoiceLocal(text){
   if(sm){ out.siteName = sm[0]; ranges.push([sm.index, sm.index+sm[0].length]); }
   else if(sm = text.match(/([^\s、。]+?)の現場/)){ out.siteName = sm[1]; ranges.push([sm.index, sm.index+sm[0].length]); }
 
-  // 日付
+  // 日付：「○月○日 から ○月○日」のように範囲マーカーで繋がった時だけ期間指定。
+  //        単一の日付・範囲マーカーなしの複数は候補日に入れる。
   const dm = [...text.matchAll(DATE_RE)];
-  if(dm.length===1){
-    out.dateFrom = resolveDateToken(dm[0][0], base) || "";
-    ranges.push([dm[0].index, dm[0].index+dm[0][0].length]);
-  }else if(dm.length>=2){
-    const between = text.slice(dm[0].index+dm[0][0].length, dm[1].index);
-    if(/から|〜|～|~|まで/.test(between)){           // 期間指定
+  if(dm.length>=1){
+    let isRange=false;
+    if(dm.length>=2){
+      const between = text.slice(dm[0].index+dm[0][0].length, dm[1].index);
+      isRange = /から|〜|～|~|まで/.test(between);
+    }
+    if(isRange){                                      // 期間指定
       out.dateMode="期間指定";
       out.dateFrom = resolveDateToken(dm[0][0], base) || "";
       out.dateTo   = resolveDateToken(dm[1][0], base, out.dateFrom) || "";
       let rEnd = dm[1].index+dm[1][0].length;
       if(text.slice(rEnd, rEnd+2)==="まで") rEnd+=2; // 末尾の「まで」も除外
       ranges.push([dm[0].index, rEnd]);
-    }else{                                            // 候補日
+    }else{                                            // 候補日（単一含む）
       out.dateMode="候補日";
       out.candidateDates = dm.map(x=>resolveDateToken(x[0], base)).filter(Boolean);
       ranges.push([dm[0].index, dm[dm.length-1].index+dm[dm.length-1][0].length]);
