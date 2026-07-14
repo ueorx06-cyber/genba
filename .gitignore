@@ -8,5 +8,6 @@ deploy.bat
 Screenshot*.jpg
 Screenshot*.png
 *.tmp
+*.bak
 .DS_Store
 Thumbs.db
