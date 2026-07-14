@@ -62,15 +62,11 @@ const ChevL    = p => <Svg w={2.4} {...p}><path d="M15 18l-6-6 6-6"/></Svg>;
 const ChevR    = p => <Svg w={2.4} {...p}><path d="M9 6l6 6-6 6"/></Svg>;
 
 // ── 定数 ──────────────────────────────────────────
-const STATUSES = ["未着手","進行中","完了"];
 const DATE_MODES = ["期間指定","候補日"];
-// ライトテーマ：淡い背景＋濃い文字＋ドット。bar=カード左帯、border=ピル枠線
-const STATUS_COLORS = {
-  "未着手":{bg:"#f1f5f9",text:"#475569",dot:"#94a3b8",border:"#e2e8f0",bar:"#cbd5e1"},
-  "進行中":{bg:"#eff6ff",text:"#1d4ed8",dot:"#2563eb",border:"#bfdbfe",bar:"#2563eb"},
-  "完了"  :{bg:"#f0fdf4",text:"#15803d",dot:"#16a34a",border:"#bbf7d0",bar:"#16a34a"},
-};
-const ORANGE = "#ea580c";
+// ステータス管理は廃止。依頼の状態は日付の時制（今日/未来/過去）で表す。
+const ORANGE = "#ea580c";   // 今日を含む（対応中）
+const BLUE   = "#2563eb";   // これから（未来の予定）
+const GRAY   = "#cbd5e1";   // 過去・予定なし
 
 const today = () => new Date().toISOString().split("T")[0];
 const fmtDate = d => { if(!d) return ""; const dt=new Date(d+"T00:00:00"); return `${dt.getMonth()+1}/${dt.getDate()}`; };
@@ -96,6 +92,36 @@ const taskOnDate = (task,d) => {
     return task.dateFrom<=d && d<=(task.dateTo||task.dateFrom);
   }
   return (task.candidateDates||[]).includes(d);
+};
+// 依頼が「過去」か（＝リスト表示から隠す判定）。
+//  期間指定：終了日（未設定なら開始日）が今日より前なら過去。
+//  候補日  ：全ての候補日が今日より前になったら過去（1つでも今日以降が残れば表示を続ける）。
+//  日付なし：過去扱いしない（予定未定として残す）。データは消さずカレンダーに履歴として残る。
+const isPast = task => {
+  const t = today();
+  if(task.dateMode==="期間指定"){
+    const end = task.dateTo || task.dateFrom;
+    return !!end && end < t;
+  }
+  const days = (task.candidateDates||[]).filter(Boolean);
+  return days.length>0 && days.every(d=>d<t);
+};
+// 日付の時制で色分け：今日=オレンジ / 未来=青 / 過去=グレー
+const dateColor = d => d<today() ? GRAY : d===today() ? ORANGE : BLUE;
+// カード左帯の色：今日を含む=オレンジ / これから=青 / それ以外=グレー
+const barColor = task => {
+  const t = today();
+  if(task.dateMode==="期間指定"){
+    if(!task.dateFrom) return GRAY;
+    const end = task.dateTo || task.dateFrom;
+    if(task.dateFrom<=t && t<=end) return ORANGE;
+    if(task.dateFrom>t) return BLUE;
+    return GRAY;
+  }
+  const days=(task.candidateDates||[]).filter(Boolean);
+  if(days.includes(t)) return ORANGE;
+  if(days.some(d=>d>t)) return BLUE;
+  return GRAY;
 };
 const WD_LABELS = ["日","月","火","水","木","金","土"];
 const emptyForm = () => ({siteName:"",detail:"",workers:"",dateMode:"期間指定",dateFrom:today(),dateTo:"",candidateDates:[""]});
@@ -307,7 +333,6 @@ function App() {
   const setTasks = ts => { setTasksRaw(ts); saveTasks(ts); };
 
   const [showForm, setShowForm]     = useState(false);
-  const [filterStatus, setFilter]   = useState("全て");
   const [form, setForm]             = useState(emptyForm());
   const [detailOpen, setDetailOpen] = useState(null);
   const [editId, setEditId]         = useState(null);
@@ -447,7 +472,7 @@ function App() {
     if(editId!==null){
       setTasks(tasks.map(t=>t.id===editId?{...t,...form}:t)); setEditId(null);
     }else{
-      setTasks([...tasks,{...form,id:nextId.current++,status:"未着手",createdAt:Date.now()}]);
+      setTasks([...tasks,{...form,id:nextId.current++,createdAt:Date.now()}]);
     }
     setForm(emptyForm()); setShowForm(false); setTranscript("");
   };
@@ -457,11 +482,12 @@ function App() {
     setEditId(task.id); setShowForm(true); setDetailOpen(null);
   };
   const handleDelete = id => { setTasks(tasks.filter(t=>t.id!==id)); setDetailOpen(null); };
-  const handleStatus = (id,s) => setTasks(tasks.map(t=>t.id===id?{...t,status:s}:t));
 
-  const filtered = tasks.filter(t=>filterStatus==="全て"||t.status===filterStatus)
-    .sort((a,b)=>{ const d=sortDate(a).localeCompare(sortDate(b)); return d!==0?d:b.createdAt-a.createdAt; });
-  const counts = STATUSES.reduce((acc,s)=>({...acc,[s]:tasks.filter(t=>t.status===s).length}),{});
+  // 日付順ソート（早い予定が上・同日は新しい登録が上）
+  const sortTasks = arr => [...arr].sort((a,b)=>{ const d=sortDate(a).localeCompare(sortDate(b)); return d!==0?d:b.createdAt-a.createdAt; });
+  // リストは「過去でない」依頼だけ表示。過去の依頼はカレンダーに履歴として残す。
+  const listTasks = sortTasks(tasks.filter(t=>!isPast(t)));
+  const pastCount = tasks.filter(isPast).length;
 
   // カレンダー：表示月のセル（月初までの空白 + 各日のYYYY-MM-DD）
   const calCells = (()=>{
@@ -474,10 +500,14 @@ function App() {
   })();
   const moveMonth = n => setCalYM(({y,m})=>{const d=new Date(y,m+n,1);return {y:d.getFullYear(),m:d.getMonth()};});
   const goToday = () => { const d=new Date(); setCalYM({y:d.getFullYear(),m:d.getMonth()}); setSelDate(today()); };
-  const selDateTasks = filtered.filter(t=>taskOnDate(t,selDate));
+  // カレンダーは履歴も含めた全依頼を対象にする（過去も残す）
+  const selDateTasks = sortTasks(tasks.filter(t=>taskOnDate(t,selDate)));
 
-  // カレンダー→リスト：該当カードを開いてスクロール
+  // カレンダー→リスト：該当カードを開いてスクロール。
+  // 過去（履歴）の依頼はリストに無いので、編集画面で内容を表示する。
   const jumpToTask = id => {
+    const task = tasks.find(t=>t.id===id);
+    if(task && isPast(task)){ handleEdit(task); return; }
     setView("リスト"); setDetailOpen(id);
     setTimeout(()=>{ const el=document.getElementById("task-"+id); if(el) el.scrollIntoView({behavior:"smooth",block:"center"}); },100);
   };
@@ -566,20 +596,6 @@ function App() {
         )}
       </div>
 
-      {/* サマリー（ステータス絞り込み） */}
-      <div style={{display:"flex",gap:8,padding:"13px 16px 0"}}>
-        {STATUSES.map(s=>{
-          const sel=filterStatus===s, c=STATUS_COLORS[s];
-          return (
-            <div key={s} onClick={()=>setFilter(f=>f===s?"全て":s)}
-              style={{flex:1,background:"#fff",border:`1.5px solid ${sel?c.dot:"#e9edf2"}`,borderRadius:13,padding:"10px 12px",cursor:"pointer",boxShadow:sel?`0 1px 6px ${c.dot}22`:"none"}}>
-              <div style={{fontSize:22,fontWeight:800,color:c.dot,lineHeight:1}}>{counts[s]}</div>
-              <div style={{fontSize:11,color:"#475569",marginTop:4,fontWeight:700}}>{s}</div>
-            </div>
-          );
-        })}
-      </div>
-
       {/* ビュー切替（リスト / カレンダー） */}
       <div style={{display:"flex",gap:6,margin:"13px 16px 0",background:"#eef1f5",borderRadius:11,padding:3}}>
         {["リスト","カレンダー"].map(v=>{
@@ -596,45 +612,41 @@ function App() {
       {/* タスクリスト */}
       {view==="リスト"&&(
       <div style={{padding:"13px 16px 100px"}}>
-        {filtered.length===0&&(
+        {listTasks.length===0&&(
           <div style={{textAlign:"center",color:"#94a3b8",padding:"60px 0"}}>
             <Clip s={40} c="#cbd5e1" w={1.8} style={{margin:"0 auto"}}/>
-            <div style={{marginTop:10,fontSize:14,fontWeight:600}}>依頼がありません</div>
+            <div style={{marginTop:10,fontSize:14,fontWeight:600}}>予定のある依頼はありません</div>
           </div>
         )}
-        {filtered.map(task=>{
-          const c=STATUS_COLORS[task.status], done=task.status==="完了", open=detailOpen===task.id;
+        {listTasks.map(task=>{
+          const bar=barColor(task), open=detailOpen===task.id;
           return (
-            <div key={task.id} id={"task-"+task.id} style={{background:done?"#fafbfc":"#fff",border:"1px solid #e9edf2",borderLeft:`5px solid ${c.bar}`,borderRadius:15,marginBottom:11,overflow:"hidden",boxShadow:"0 1px 2px rgba(15,23,42,.04)"}}>
+            <div key={task.id} id={"task-"+task.id} style={{background:"#fff",border:"1px solid #e9edf2",borderLeft:`5px solid ${bar}`,borderRadius:15,marginBottom:11,overflow:"hidden",boxShadow:"0 1px 2px rgba(15,23,42,.04)"}}>
               <div onClick={()=>setDetailOpen(open?null:task.id)}
                 style={{padding:"14px 15px",cursor:"pointer",display:"flex",alignItems:"flex-start",gap:12}}>
                 <div style={{flex:1,minWidth:0}}>
                   {task.siteName&&(
                     <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:7}}>
                       <Pin s={16} c="#94a3b8"/>
-                      <span style={{fontSize:17,color:done?"#334155":"#0f172a",fontWeight:800,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{task.siteName}</span>
+                      <span style={{fontSize:17,color:"#0f172a",fontWeight:800,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{task.siteName}</span>
                     </div>
                   )}
                   <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:7,flexWrap:"wrap"}}>
                     {dateLabel(task)&&(
                       <span onClick={e=>{e.stopPropagation();const d=sortDate(task);if(d!=="9999-12-31")jumpToDate(d);}}
-                        style={{display:"flex",alignItems:"center",gap:6,color:done?"#64748b":"#0e7490",fontSize:15,fontWeight:800,textDecoration:"underline dotted",textUnderlineOffset:3,textDecorationColor:done?"#cbd5e1":"#67c3d4"}}>
-                        <Cal s={15} c={done?"#cbd5e1":"#0e7490"}/>{dateLabel(task)}
+                        style={{display:"flex",alignItems:"center",gap:6,color:"#0e7490",fontSize:15,fontWeight:800,textDecoration:"underline dotted",textUnderlineOffset:3,textDecorationColor:"#67c3d4"}}>
+                        <Cal s={15} c="#0e7490"/>{dateLabel(task)}
                       </span>
                     )}
                     {task.workers&&(
-                      <span style={{display:"flex",alignItems:"center",gap:5,color:done?"#94a3b8":"#b45309",fontSize:14,fontWeight:700}}>
-                        <Users s={15} c={done?"#cbd5e1":"#b45309"}/>{task.workers}
+                      <span style={{display:"flex",alignItems:"center",gap:5,color:"#b45309",fontSize:14,fontWeight:700}}>
+                        <Users s={15} c="#b45309"/>{task.workers}
                       </span>
                     )}
                   </div>
-                  <div style={{fontWeight:600,fontSize:14,color:task.detail?(done?"#94a3b8":"#64748b"):"#cbd5e1",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{task.detail||"（作業内容なし）"}</div>
+                  <div style={{fontWeight:600,fontSize:14,color:task.detail?"#64748b":"#cbd5e1",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{task.detail||"（作業内容なし）"}</div>
                 </div>
-                <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:8,flexShrink:0}}>
-                  <div style={{background:c.bg,color:c.text,border:`1px solid ${c.border}`,fontSize:12,padding:"4px 10px",borderRadius:999,fontWeight:800,display:"flex",alignItems:"center",gap:5,whiteSpace:"nowrap"}}>
-                    {done ? <Check s={13} c={c.dot} w={3}/> : <div style={{width:6,height:6,borderRadius:"50%",background:c.dot}}/>}
-                    {task.status}
-                  </div>
+                <div style={{flexShrink:0,paddingTop:2}}>
                   {open?<ChevUp s={18} c="#cbd5e1"/>:<ChevDown s={18} c="#cbd5e1"/>}
                 </div>
               </div>
@@ -647,15 +659,6 @@ function App() {
                     <div style={{fontSize:13,color:"#475569",marginBottom:8,display:"flex",alignItems:"center",gap:6,fontWeight:600}}><Cal s={15} c="#94a3b8"/>候補日：{task.candidateDates.filter(Boolean).map(fmtDate).join("　/　")}</div>
                   )}
                   {task.detail&&<div style={{fontSize:14,color:"#334155",marginBottom:13,lineHeight:1.7}}>{task.detail}</div>}
-                  <div style={{display:"flex",gap:7,marginBottom:13,flexWrap:"wrap"}}>
-                    {STATUSES.map(s=>{
-                      const sc=STATUS_COLORS[s], on=task.status===s;
-                      return (
-                        <button key={s} onClick={()=>handleStatus(task.id,s)}
-                          style={{padding:"6px 13px",borderRadius:999,border:"1.5px solid",borderColor:on?sc.dot:"#e2e8f0",background:on?sc.bg:"#fff",color:on?sc.text:"#94a3b8",fontSize:12.5,fontWeight:800,cursor:"pointer",whiteSpace:"nowrap"}}>{s}</button>
-                      );
-                    })}
-                  </div>
                   <div style={{display:"flex",gap:8}}>
                     <button onClick={()=>handleEdit(task)} style={{flex:1,background:"#fff",color:"#475569",border:"1.5px solid #e2e8f0",borderRadius:10,padding:"9px",fontSize:13.5,cursor:"pointer",fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}><Edit s={15} c="#64748b"/>編集</button>
                     <button onClick={()=>handleDelete(task.id)} style={{flex:1,background:"#fff",color:"#dc2626",border:"1.5px solid #fecaca",borderRadius:10,padding:"9px",fontSize:13.5,cursor:"pointer",fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}><Trash s={15} c="#dc2626"/>削除</button>
@@ -665,6 +668,12 @@ function App() {
             </div>
           );
         })}
+        {pastCount>0&&(
+          <div onClick={()=>setView("カレンダー")}
+            style={{marginTop:6,textAlign:"center",color:"#94a3b8",fontSize:12.5,fontWeight:600,cursor:"pointer",padding:"12px",display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+            <Cal s={14} c="#94a3b8"/>予定日が過ぎた依頼 {pastCount}件はカレンダーに履歴として残っています
+          </div>
+        )}
       </div>
       )}
 
@@ -691,14 +700,14 @@ function App() {
           <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2}}>
             {calCells.map((d,i)=>{
               if(!d) return <div key={"e"+i}/>;
-              const dayTasks=filtered.filter(t=>taskOnDate(t,d));
+              const dayTasks=tasks.filter(t=>taskOnDate(t,d));
               const isToday=d===today(), isSel=d===selDate, dow=i%7;
               return (
                 <div key={d} onClick={()=>setSelDate(d)}
                   style={{minHeight:52,borderRadius:9,padding:"5px 2px",cursor:"pointer",textAlign:"center",background:isSel?"#fff7ed":"transparent",border:`1.5px solid ${isSel?"#fdba74":"transparent"}`}}>
                   <div style={{fontSize:13,fontWeight:800,lineHeight:1,width:23,height:23,margin:"0 auto",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:"50%",background:isToday?ORANGE:"transparent",color:isToday?"#fff":dow===0?"#dc2626":dow===6?"#2563eb":"#334155"}}>{+d.slice(8)}</div>
                   <div style={{display:"flex",gap:2,justifyContent:"center",alignItems:"center",marginTop:5,flexWrap:"wrap",minHeight:7}}>
-                    {dayTasks.slice(0,3).map(t=><span key={t.id} style={{width:6,height:6,borderRadius:"50%",background:STATUS_COLORS[t.status].bar,display:"inline-block"}}/>)}
+                    {dayTasks.slice(0,3).map(t=><span key={t.id} style={{width:6,height:6,borderRadius:"50%",background:dateColor(d),display:"inline-block"}}/>)}
                     {dayTasks.length>3&&<span style={{fontSize:9,color:"#94a3b8",fontWeight:800,lineHeight:1}}>+{dayTasks.length-3}</span>}
                   </div>
                 </div>
@@ -716,11 +725,9 @@ function App() {
           {selDateTasks.length===0&&(
             <div style={{textAlign:"center",color:"#94a3b8",background:"#fff",border:"1px dashed #e2e8f0",borderRadius:13,padding:"22px 0",fontSize:13.5,fontWeight:600}}>この日の予定はありません</div>
           )}
-          {selDateTasks.map(task=>{
-            const c=STATUS_COLORS[task.status];
-            return (
+          {selDateTasks.map(task=>(
               <div key={task.id} onClick={()=>jumpToTask(task.id)}
-                style={{background:"#fff",border:"1px solid #e9edf2",borderLeft:`5px solid ${c.bar}`,borderRadius:13,padding:"11px 13px",marginBottom:8,cursor:"pointer",display:"flex",alignItems:"center",gap:10,boxShadow:"0 1px 2px rgba(15,23,42,.04)"}}>
+                style={{background:"#fff",border:"1px solid #e9edf2",borderLeft:`5px solid ${dateColor(selDate)}`,borderRadius:13,padding:"11px 13px",marginBottom:8,cursor:"pointer",display:"flex",alignItems:"center",gap:10,boxShadow:"0 1px 2px rgba(15,23,42,.04)"}}>
                 <div style={{flex:1,minWidth:0}}>
                   {task.siteName&&(
                     <div style={{fontSize:14.5,fontWeight:800,color:"#0f172a",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:5}}><Pin s={13} c="#94a3b8"/>{task.siteName}</div>
@@ -729,11 +736,10 @@ function App() {
                     {task.dateMode==="候補日"?"候補日 ":""}{dateLabel(task)}{task.workers?`　${task.workers}`:""}{task.detail?`　${task.detail}`:""}
                   </div>
                 </div>
-                <div style={{background:c.bg,color:c.text,border:`1px solid ${c.border}`,fontSize:11,padding:"3px 9px",borderRadius:999,fontWeight:800,whiteSpace:"nowrap",flexShrink:0}}>{task.status}</div>
+                {selDate<today()&&<span style={{background:"#f1f5f9",color:"#94a3b8",fontSize:11,padding:"3px 9px",borderRadius:999,fontWeight:800,whiteSpace:"nowrap",flexShrink:0}}>履歴</span>}
                 <ChevR s={15} c="#cbd5e1"/>
               </div>
-            );
-          })}
+          ))}
         </div>
       </div>
       )}
