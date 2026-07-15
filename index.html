@@ -327,6 +327,34 @@ function MicButton({onText}){
   );
 }
 
+// ── 人数の構造化（1〜5人チェック＋自由入力）───────────────
+// workers は従来どおり1本の文字列で保存する（データ構造は不変）。
+// UI用に「チェックした1〜5の数字」と「その他自由テキスト」へ分解／再合成する。
+const WORKER_NUMS = [1,2,3,4,5];
+function parseWorkers(str){
+  str=(str||"").trim();
+  const nums=new Set(); let rest=str, m;
+  if(m=rest.match(/^([1-5])\s*[〜～~ー－\-]\s*([1-5])人\s*/)){            // 「2〜4人」
+    for(let n=Math.min(+m[1],+m[2]);n<=Math.max(+m[1],+m[2]);n++) nums.add(n);
+    rest=rest.slice(m[0].length);
+  }else{                                                                  // 「1人・3人」
+    while(m=rest.match(/^([1-5])人[・、]?\s*/)){ nums.add(+m[1]); rest=rest.slice(m[0].length); }
+  }
+  return {nums:[...nums].sort((a,b)=>a-b), free:rest.trim()};
+}
+function buildWorkers(nums, free){
+  nums=[...new Set(nums)].sort((a,b)=>a-b);
+  let s="";
+  if(nums.length){
+    const contiguous = nums[nums.length-1]-nums[0]===nums.length-1;
+    s = (contiguous&&nums.length>1) ? `${nums[0]}〜${nums[nums.length-1]}人`
+      : nums.length===1 ? `${nums[0]}人`
+      : nums.map(n=>n+"人").join("・");
+  }
+  free=(free||"").trim();
+  return (s+(free?(s?" ":"")+free:"")).trim();
+}
+
 // ── メインアプリ ──────────────────────────────────
 function App() {
   const [tasks, setTasksRaw] = useState(() => loadTasks() || DEMO);
@@ -334,7 +362,6 @@ function App() {
 
   const [showForm, setShowForm]     = useState(false);
   const [form, setForm]             = useState(emptyForm());
-  const [detailOpen, setDetailOpen] = useState(null);
   const [editId, setEditId]         = useState(null);
 
   // ビュー切替（リスト / カレンダー）
@@ -372,10 +399,17 @@ function App() {
     });
   };
 
+  // 人数操作（1〜5人チェック＋自由入力を workers 文字列へ合成）
+  const wp = parseWorkers(form.workers);
+  const toggleWorkerNum = n => { const s=new Set(wp.nums); s.has(n)?s.delete(n):s.add(n); setF("workers",buildWorkers([...s],wp.free)); };
+  const setWorkerFree   = v => setF("workers",buildWorkers(wp.nums,v));
+
   // 候補日操作
   const setCandDate = (i,v) => { const a=[...(form.candidateDates||[])]; a[i]=v; setF("candidateDates",a); };
-  const addCandDate = () => setF("candidateDates",[...(form.candidateDates||[]),""]); 
+  const addCandDate = () => setF("candidateDates",[...(form.candidateDates||[]),""]);
   const rmCandDate  = i => { const a=[...(form.candidateDates||[])]; a.splice(i,1); setF("candidateDates",a); };
+  // 候補日→確定：選んだ日を期間指定（単日）にする。候補日データは残すので後から「選び直す」で戻せる
+  const confirmCandidate = d => setForm(f=>({...f,dateMode:"期間指定",dateFrom:d,dateTo:""}));
 
   // 通常音声（作業内容欄）
   const startRec = () => {
@@ -479,9 +513,9 @@ function App() {
 
   const handleEdit = task => {
     setForm({siteName:task.siteName||"",detail:task.detail||"",workers:task.workers||"",dateMode:task.dateMode||"期間指定",dateFrom:task.dateFrom||"",dateTo:task.dateTo||"",candidateDates:task.candidateDates||[""]});
-    setEditId(task.id); setShowForm(true); setDetailOpen(null);
+    setEditId(task.id); setShowForm(true);
   };
-  const handleDelete = id => { setTasks(tasks.filter(t=>t.id!==id)); setDetailOpen(null); };
+  const handleDelete = id => { setTasks(tasks.filter(t=>t.id!==id)); setShowForm(false); setEditId(null); setForm(emptyForm()); };
 
   // 日付順ソート（早い予定が上・同日は新しい登録が上）
   const sortTasks = arr => [...arr].sort((a,b)=>{ const d=sortDate(a).localeCompare(sortDate(b)); return d!==0?d:b.createdAt-a.createdAt; });
@@ -503,18 +537,10 @@ function App() {
   // カレンダーは履歴も含めた全依頼を対象にする（過去も残す）
   const selDateTasks = sortTasks(tasks.filter(t=>taskOnDate(t,selDate)));
 
-  // カレンダー→リスト：該当カードを開いてスクロール。
-  // 過去（履歴）の依頼はリストに無いので、編集画面で内容を表示する。
+  // カレンダー→依頼：タップで詳細・編集シートを開く（過去の履歴も同様に開ける）
   const jumpToTask = id => {
     const task = tasks.find(t=>t.id===id);
-    if(task && isPast(task)){ handleEdit(task); return; }
-    setView("リスト"); setDetailOpen(id);
-    setTimeout(()=>{ const el=document.getElementById("task-"+id); if(el) el.scrollIntoView({behavior:"smooth",block:"center"}); },100);
-  };
-  // リスト→カレンダー：カードの日付タップでその日へ
-  const jumpToDate = d => {
-    const dt=new Date(d+"T00:00:00");
-    setCalYM({y:dt.getFullYear(),m:dt.getMonth()}); setSelDate(d); setView("カレンダー");
+    if(task) handleEdit(task);
   };
 
   // ── レンダリング ──────────────────────────────────
@@ -619,11 +645,12 @@ function App() {
           </div>
         )}
         {listTasks.map(task=>{
-          const bar=barColor(task), open=detailOpen===task.id;
+          const bar=barColor(task);
+          // カードをタップすると詳細・編集シートを開く（カレンダーには飛ばない）
           return (
-            <div key={task.id} id={"task-"+task.id} style={{background:"#fff",border:"1px solid #e9edf2",borderLeft:`5px solid ${bar}`,borderRadius:15,marginBottom:11,overflow:"hidden",boxShadow:"0 1px 2px rgba(15,23,42,.04)"}}>
-              <div onClick={()=>setDetailOpen(open?null:task.id)}
-                style={{padding:"14px 15px",cursor:"pointer",display:"flex",alignItems:"flex-start",gap:12}}>
+            <div key={task.id} id={"task-"+task.id} onClick={()=>handleEdit(task)}
+              style={{background:"#fff",border:"1px solid #e9edf2",borderLeft:`5px solid ${bar}`,borderRadius:15,marginBottom:11,overflow:"hidden",boxShadow:"0 1px 2px rgba(15,23,42,.04)",cursor:"pointer"}}>
+              <div style={{padding:"14px 15px",display:"flex",alignItems:"center",gap:12}}>
                 <div style={{flex:1,minWidth:0}}>
                   {task.siteName&&(
                     <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:7}}>
@@ -633,8 +660,7 @@ function App() {
                   )}
                   <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:7,flexWrap:"wrap"}}>
                     {dateLabel(task)&&(
-                      <span onClick={e=>{e.stopPropagation();const d=sortDate(task);if(d!=="9999-12-31")jumpToDate(d);}}
-                        style={{display:"flex",alignItems:"center",gap:6,color:"#0e7490",fontSize:15,fontWeight:800,textDecoration:"underline dotted",textUnderlineOffset:3,textDecorationColor:"#67c3d4"}}>
+                      <span style={{display:"flex",alignItems:"center",gap:6,color:"#0e7490",fontSize:15,fontWeight:800}}>
                         <Cal s={15} c="#0e7490"/>{dateLabel(task)}
                       </span>
                     )}
@@ -646,25 +672,8 @@ function App() {
                   </div>
                   <div style={{fontWeight:600,fontSize:14,color:task.detail?"#64748b":"#cbd5e1",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{task.detail||"（作業内容なし）"}</div>
                 </div>
-                <div style={{flexShrink:0,paddingTop:2}}>
-                  {open?<ChevUp s={18} c="#cbd5e1"/>:<ChevDown s={18} c="#cbd5e1"/>}
-                </div>
+                <div style={{flexShrink:0}}><ChevR s={18} c="#cbd5e1"/></div>
               </div>
-              {open&&(
-                <div style={{borderTop:"1px solid #eef1f5",padding:"13px 15px",background:"#f8fafc"}}>
-                  {task.dateMode==="期間指定"&&task.dateFrom&&(
-                    <div style={{fontSize:13,color:"#475569",marginBottom:8,display:"flex",alignItems:"center",gap:6,fontWeight:600}}><Cal s={15} c="#94a3b8"/>期間：{fmtDate(task.dateFrom)}{task.dateTo?`〜${fmtDate(task.dateTo)}`:"〜（未定）"}</div>
-                  )}
-                  {task.dateMode==="候補日"&&(task.candidateDates||[]).filter(Boolean).length>0&&(
-                    <div style={{fontSize:13,color:"#475569",marginBottom:8,display:"flex",alignItems:"center",gap:6,fontWeight:600}}><Cal s={15} c="#94a3b8"/>候補日：{task.candidateDates.filter(Boolean).map(fmtDate).join("　/　")}</div>
-                  )}
-                  {task.detail&&<div style={{fontSize:14,color:"#334155",marginBottom:13,lineHeight:1.7}}>{task.detail}</div>}
-                  <div style={{display:"flex",gap:8}}>
-                    <button onClick={()=>handleEdit(task)} style={{flex:1,background:"#fff",color:"#475569",border:"1.5px solid #e2e8f0",borderRadius:10,padding:"9px",fontSize:13.5,cursor:"pointer",fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}><Edit s={15} c="#64748b"/>編集</button>
-                    <button onClick={()=>handleDelete(task.id)} style={{flex:1,background:"#fff",color:"#dc2626",border:"1.5px solid #fecaca",borderRadius:10,padding:"9px",fontSize:13.5,cursor:"pointer",fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}><Trash s={15} c="#dc2626"/>削除</button>
-                  </div>
-                </div>
-              )}
             </div>
           );
         })}
@@ -765,7 +774,16 @@ function App() {
               <label style={{...LS,marginBottom:0}}><Users s={16} c={ORANGE}/>人数</label>
               <MicButton onText={t=>appendF("workers",t)}/>
             </div>
-            <input value={form.workers} onChange={e=>setF("workers",e.target.value)} placeholder="例：2〜3人、5人程度、1人" style={{...IS,marginBottom:15}}/>
+            <div style={{display:"flex",gap:6,marginBottom:8}}>
+              {WORKER_NUMS.map(n=>{
+                const on=wp.nums.includes(n);
+                return (
+                  <button key={n} onClick={()=>toggleWorkerNum(n)}
+                    style={{flex:1,padding:"11px 0",borderRadius:10,border:`1.5px solid ${on?ORANGE:"#e2e8f0"}`,background:on?ORANGE:"#fff",color:on?"#fff":"#475569",fontSize:15,fontWeight:800,cursor:"pointer"}}>{n}人</button>
+                );
+              })}
+            </div>
+            <input value={wp.free} onChange={e=>setWorkerFree(e.target.value)} placeholder="その他（例：6人、2〜3人程度、未定）" style={{...IS,marginBottom:15}}/>
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:7}}>
               <label style={{...LS,marginBottom:0}}><Cal s={16} c={ORANGE}/>日付</label>
@@ -781,10 +799,17 @@ function App() {
               })}
             </div>
             {form.dateMode==="期間指定"&&(
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:15}}>
-                <input type="date" value={form.dateFrom} onChange={e=>setF("dateFrom",e.target.value)} style={{...IS,flex:1}}/>
-                <span style={{color:"#94a3b8",fontSize:14,flexShrink:0,fontWeight:700}}>〜</span>
-                <input type="date" value={form.dateTo} onChange={e=>setF("dateTo",e.target.value)} style={{...IS,flex:1}}/>
+              <div style={{marginBottom:15}}>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <input type="date" value={form.dateFrom} onChange={e=>setF("dateFrom",e.target.value)} style={{...IS,flex:1}}/>
+                  <span style={{color:"#94a3b8",fontSize:14,flexShrink:0,fontWeight:700}}>〜</span>
+                  <input type="date" value={form.dateTo} onChange={e=>setF("dateTo",e.target.value)} style={{...IS,flex:1}}/>
+                </div>
+                {/* 候補日から確定した場合：候補が残っているので選び直せる */}
+                {(form.candidateDates||[]).filter(Boolean).length>0&&(
+                  <button onClick={()=>setF("dateMode","候補日")}
+                    style={{marginTop:8,background:"#fff",border:"1.5px dashed #cbd5e1",borderRadius:10,color:"#475569",padding:"9px 14px",fontSize:13,cursor:"pointer",width:"100%",fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}><Cal s={15} c="#64748b"/>候補日から選び直す</button>
+                )}
               </div>
             )}
             {form.dateMode==="候補日"&&(
@@ -793,12 +818,17 @@ function App() {
                   <div key={i} style={{display:"flex",gap:8,marginBottom:8,alignItems:"center"}}>
                     <span style={{color:"#64748b",fontSize:12,minWidth:28,fontWeight:700}}>第{i+1}</span>
                     <input type="date" value={d} onChange={e=>setCandDate(i,e.target.value)} style={{...IS,flex:1}}/>
+                    {d&&(
+                      <button onClick={()=>confirmCandidate(d)} title="この日で確定する"
+                        style={{background:"#fff7ed",border:`1.5px solid #fdba74`,color:ORANGE,borderRadius:9,padding:"9px 11px",cursor:"pointer",fontSize:12.5,fontWeight:800,display:"flex",alignItems:"center",gap:4,whiteSpace:"nowrap",flexShrink:0}}><Check s={14} c={ORANGE}/>確定</button>
+                    )}
                     {(form.candidateDates||[]).length>1&&(
-                      <button onClick={()=>rmCandDate(i)} style={{background:"#fff",border:"1.5px solid #fecaca",color:"#dc2626",borderRadius:9,padding:"9px 11px",cursor:"pointer",display:"flex",alignItems:"center"}}><Close s={14} c="#dc2626"/></button>
+                      <button onClick={()=>rmCandDate(i)} style={{background:"#fff",border:"1.5px solid #fecaca",color:"#dc2626",borderRadius:9,padding:"9px 11px",cursor:"pointer",display:"flex",alignItems:"center",flexShrink:0}}><Close s={14} c="#dc2626"/></button>
                     )}
                   </div>
                 ))}
                 <button onClick={addCandDate} style={{background:"#fff",border:"1.5px dashed #cbd5e1",borderRadius:10,color:"#475569",padding:"9px 14px",fontSize:13.5,cursor:"pointer",width:"100%",fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}><Plus s={15} c="#64748b"/>候補日を追加</button>
+                <div style={{fontSize:11.5,color:"#94a3b8",marginTop:7,lineHeight:1.6}}>日程が決まったら「確定」を押すと、その日で確定します（後から「候補日から選び直す」で戻せます）</div>
               </div>
             )}
 
@@ -820,6 +850,12 @@ function App() {
               style={{width:"100%",background:canSubmit?ORANGE:"#e2e8f0",color:canSubmit?"#fff":"#94a3b8",border:"none",borderRadius:13,padding:"15px",fontWeight:800,fontSize:16,cursor:canSubmit?"pointer":"not-allowed",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
               <Check s={18} c={canSubmit?"#fff":"#94a3b8"}/>{editId!==null?"更新する":"依頼を追加"}
             </button>
+            {editId!==null&&(
+              <button onClick={()=>handleDelete(editId)}
+                style={{width:"100%",marginTop:10,background:"#fff",color:"#dc2626",border:"1.5px solid #fecaca",borderRadius:13,padding:"13px",fontWeight:800,fontSize:14.5,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:7}}>
+                <Trash s={17} c="#dc2626"/>この依頼を削除
+              </button>
+            )}
           </div>
         </div>
       )}
